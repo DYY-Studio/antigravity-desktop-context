@@ -31,9 +31,10 @@ To update, run `git pull` inside that folder, then turn the plugin off and on ag
 
 The report follows the CLI's `/context` (`cli/model.ContextModel` in agy 1.4.4), ported from the CLI binary:
 
-- **Header**: model name, used/limit tokens and percentage.
+- **Header**: model name, used/limit tokens, percentage, and the active request budget watermark (e.g. 256k compaction threshold).
 - **Usage grid**: each dot is 1% of the context window. Segments, in order: system (prompt + tools + overhead), user messages, agent responses, tool calls, customizations, then free space. Every non-empty segment gets at least one dot.
 - **Token usage**: `User messages`, `Agent responses` and `Tool calls` always show; `System messages`, `System prompt`, `System tools`, `System overhead`, `Rules`, `Skills`, `Subagents`, `Legacy workflows`, `Workflows`, `Plugins` and `MCP tools` show only when non-zero. Then `Free space`, and the `Checkpoint buffer` (tokens in checkpoint steps, not counted in usage).
+- **Subagents**: live monitor cards for spawned subagents showing role, type, model, run state (`Running` / `Generating` / `Reported` / `Idle` / `Canceled` / `Error`), 256k request budget watermark bar, compaction count, step count, elapsed time, current action, collapsible recent steps, in-panel context drill-down (`Context`), and one-click main window switching (`Open ↗`).
 - **Before the first reply, or right after a compaction**: per-step estimates, like the CLI ("Estimated usage (awaiting generation)" / "Estimated after compaction · updates next turn").
 - **Checkpoints**: the active checkpoint and how many older ones were summarized.
 - **Files**: knowledge and artifact files written by the agent, skill files it opened (with the tokens those steps cost), and the auto-loaded system folders, including the workspace's `.agents/` folders.

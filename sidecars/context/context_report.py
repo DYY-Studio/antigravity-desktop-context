@@ -88,7 +88,44 @@ STEP_PLANNER_RESPONSE = 20
 STEP_CHECKPOINT = 30
 STEP_CODE_ACTION = 10
 
+STATUS_PENDING = 1
+STATUS_RUNNING = 2
 STATUS_DONE = 3
+STATUS_INVALID = 4
+STATUS_CLEARED = 5
+STATUS_CANCELED = 6
+STATUS_ERROR = 7
+STATUS_GENERATING = 8
+STATUS_WAITING = 9
+STATUS_INTERRUPTED = 10
+STATUS_HALTED = 11
+
+STEP_STATUS_NAMES = {
+    STATUS_PENDING: "pending",
+    STATUS_RUNNING: "running",
+    STATUS_DONE: "done",
+    STATUS_INVALID: "error",
+    STATUS_CANCELED: "canceled",
+    STATUS_ERROR: "error",
+    STATUS_GENERATING: "generating",
+    STATUS_WAITING: "waiting",
+    STATUS_INTERRUPTED: "canceled",
+    STATUS_HALTED: "canceled",
+}
+
+TERM_REASON_NAMES = {
+    1: "error",
+    2: "user_canceled",
+    3: "max_invocations",
+    4: "no_tool_call",
+    5: "max_forced_invocations",
+    6: "early_continue",
+    7: "terminal_step_type",
+    8: "terminal_custom_hook",
+    9: "injected_response",
+    10: "max_token_budget_exceeded",
+    11: "halted_step",
+}
 
 # TokenType values of TopLevelTokenGroup.type.
 TOKEN_SYSTEM_PROMPT, TOKEN_TOOLS, TOKEN_RULES, TOKEN_MCP_TOOLS, TOKEN_SKILLS = 1, 2, 3, 4, 5
@@ -215,6 +252,7 @@ class Step:
         self.type = self.pb.int(1) if self.pb.has(1) else step_type
         self.status = self.pb.int(4) if self.pb.has(4) else status
         self.md = self.pb.msg(5) or Msg(metadata)
+        self.generic_pb = self.pb.msg(STEP_GENERIC) if self.type == GENERIC_TYPE else None
         self.view_file_override: Msg | None = None
         if self.type == GENERIC_TYPE:
             self.rehydrate()
@@ -639,7 +677,55 @@ def render_file_section(title: str, subtitle: str, items: list[tuple[str, int]])
     return "".join(out)
 
 
-def render(st: dict, model: str, system_files: list[tuple[str, int]], term_width: int, color: bool) -> str:
+def fmt_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return ""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def truncate_text(text: str, max_chars: int = 60) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= max_chars:
+        return clean
+    return clean[: max(1, max_chars - 1)].rstrip() + "…"
+
+
+def render_subagents(subagents: list[dict]) -> str:
+    if not subagents:
+        return ""
+    out = [f"\nSubagents ({len(subagents)})\n"]
+    for s in subagents:
+        role = s.get("role") or s.get("type_name") or s["conversation_id"][:8]
+        tname = f" ({s['type_name']})" if s.get("type_name") and s.get("role") else ""
+        state = s.get("state", "idle").upper()
+        used = fmt_tok(s.get("used_tokens", 0))
+        budget = s.get("request_budget_tokens") or s.get("limit_tokens") or 0
+        budget_str = f"/{fmt_tok(budget)} budget ({s.get('budget_pct', 0.0):.1f}%)" if budget else ""
+        ck = f" · Compacted ×{s['checkpoint_count']}" if s.get("checkpoint_count") else ""
+        dur = fmt_duration(s.get("duration_seconds", 0))
+        dur_str = f" · {dur}" if dur else ""
+        action = f" — {s['current_action']}" if s.get("current_action") else ""
+        out.append(
+            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{action}\n"
+        )
+    return "".join(out)
+
+
+def render(
+    st: dict,
+    model: str,
+    system_files: list[tuple[str, int]],
+    term_width: int,
+    color: bool,
+    subagents: list[dict] | None = None,
+) -> str:
     stats = render_stats(st, model)
     grid_width = max(20, (2 * term_width) // 5)
     if term_width >= 70 and term_width - grid_width - 6 >= 40:
@@ -657,6 +743,8 @@ def render(st: dict, model: str, system_files: list[tuple[str, int]], term_width
         body = stats + "\n" + "\n".join(grid) + "\n"
 
     parts = ["└ Context Usage\n", "\n", body]
+    if subagents:
+        parts.append(render_subagents(subagents))
     ck = render_checkpoints(st)
     if ck:
         parts += ["\n", ck]
@@ -668,7 +756,7 @@ def render(st: dict, model: str, system_files: list[tuple[str, int]], term_width
     return "".join(parts)
 
 
-# --- main --------------------------------------------------------------------
+# --- subagents & metadata ----------------------------------------------------
 
 
 def load(db_path: Path) -> tuple[list[Step], Msg | None]:
@@ -681,6 +769,450 @@ def load(db_path: Path) -> tuple[list[Step], Msg | None]:
     finally:
         conn.close()
     return steps, (Msg(row[0]) if row else None)
+
+
+def load_meta(db_path: Path) -> tuple[Msg | None, int, int]:
+    """Read trajectory_metadata_blob and latest executor_metadata termination info."""
+    uri = "file:" + db_path.as_posix() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    tmb = None
+    term_reason = 0
+    term_step_idx = -1
+    try:
+        try:
+            row = conn.execute("SELECT data FROM trajectory_metadata_blob LIMIT 1").fetchone()
+            if row and row[0]:
+                tmb = Msg(row[0])
+        except sqlite3.Error:
+            pass
+        try:
+            erow = conn.execute("SELECT data FROM executor_metadata ORDER BY idx DESC LIMIT 1").fetchone()
+            if erow and erow[0]:
+                em = Msg(erow[0])
+                term_reason = em.int(1)
+                term_step_idx = em.int(3)
+        except sqlite3.Error:
+            pass
+    finally:
+        conn.close()
+    return tmb, term_reason, term_step_idx
+
+
+def parse_trajectory_lineage(tmb: Msg | None, conv_id: str) -> dict:
+    if tmb is None:
+        return {
+            "parent_conversation_id": "",
+            "root_conversation_id": conv_id,
+            "created_at": 0,
+            "subagent_info": None,
+        }
+    parent_id = tmb.str(5)
+    root_id = tmb.str(6) or parent_id or conv_id
+    ts_msg = tmb.msg(2)
+    created_at = ts_msg.int(1) if ts_msg is not None else 0
+    spec = tmb.msg(8)
+    subagent_info = None
+    if parent_id or spec is not None:
+        subagent_info = {
+            "type_name": spec.str(1) if spec is not None else "",
+            "role": spec.str(2) if spec is not None else "",
+            "nesting_depth": tmb.int(17) or (1 if parent_id else 0),
+        }
+    return {
+        "parent_conversation_id": parent_id,
+        "root_conversation_id": root_id,
+        "created_at": created_at,
+        "subagent_info": subagent_info,
+    }
+
+
+def step_timestamps(steps: list[Step], created_at: int = 0) -> tuple[int, int, int]:
+    start_ts = created_at
+    if not start_ts and steps:
+        for fn in (1, 6, 7, 8):
+            m = steps[0].md.msg(fn)
+            if m and m.int(1) > 0:
+                start_ts = m.int(1)
+                break
+    end_ts = start_ts
+    for step in reversed(steps):
+        found = 0
+        for fn in (8, 7, 6, 1):
+            m = step.md.msg(fn)
+            if m and m.int(1) > 0:
+                found = m.int(1)
+                break
+        if found:
+            end_ts = max(start_ts, found)
+            break
+    duration = max(0, end_ts - start_ts) if start_ts and end_ts else 0
+    return start_ts, end_ts, duration
+
+
+def extract_tool_call(step: Step) -> tuple[str, dict]:
+    tc = step.md.msg(4)
+    tool = tc.str(2) if tc is not None else ""
+    args: dict = {}
+    if tc is not None and tc.str(3):
+        try:
+            parsed = json.loads(tc.str(3))
+            if isinstance(parsed, dict):
+                args = parsed
+        except json.JSONDecodeError:
+            pass
+    if not args and step.generic_pb is not None:
+        kv = {m.str(1): m.str(2) for m in step.generic_pb.msgs(1) if m.str(1)}
+        if kv:
+            args = {k: v.strip('"') if isinstance(v, str) else v for k, v in kv.items()}
+            if not tool and ("Role" in args or "TypeName" in args):
+                tool = "invoke_subagent"
+    return tool, args
+
+
+def summarize_step(step: Step) -> dict | None:
+    status_name = STEP_STATUS_NAMES.get(step.status, "done")
+    tool, args = extract_tool_call(step)
+
+    if tool in ("read_file", "view_file") or (step.type == 8 and not tool):
+        path = next(
+            (args[k] for k in ("Path", "AbsolutePath", "FilePath") if isinstance(args.get(k), str) and args[k]),
+            "",
+        )
+        if not path:
+            vf = step.payload(STEP_VIEW_FILE)
+            path = vf.str(1) if vf is not None else ""
+        short = shorten_path(path) if path else "file"
+        base = Path(short.rstrip("/")).name or short
+        start, end = args.get("StartLine"), args.get("EndLine")
+        rng = f" (L{start}-{end})" if start and end else (f" (L{start}+)" if start else "")
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": tool or "view_file",
+            "label": f"Read {base}{rng}",
+            "detail": short,
+        }
+
+    if tool == "run_command" or step.type == 21:
+        summary = str(args.get("toolSummary") or "").strip()
+        cmd = str(args.get("CommandLine") or "").strip()
+        first_cmd = cmd.splitlines()[0].strip() if cmd else ""
+        label = f"Run: {truncate_text(summary or first_cmd or 'command', 48)}"
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": "run_command",
+            "label": label,
+            "detail": truncate_text(first_cmd, 80),
+        }
+
+    if tool in ("edit_file", "write_file", "replace_file_content", "multi_replace_file_content") or step.type == 5:
+        path = next(
+            (args[k] for k in ("Path", "TargetFile", "AbsolutePath") if isinstance(args.get(k), str) and args[k]),
+            "",
+        )
+        if not path:
+            ca = step.payload(STEP_CODE_ACTION)
+            res = ca.msg(2) if ca is not None else None
+            ed = res.msg(1) if res is not None else None
+            path = ed.str(8) if ed is not None else ""
+        short = shorten_path(path) if path else "file"
+        base = Path(short.rstrip("/")).name or short
+        verb = "Write" if tool == "write_file" else "Edit"
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": tool or "code_action",
+            "label": f"{verb} {base}",
+            "detail": short,
+        }
+
+    if tool in ("grep_search", "find_by_name") or step.type in (7, 25):
+        q = str(args.get("Query") or args.get("Pattern") or "").strip()
+        label = f"Search: {truncate_text(q, 42)}" if q else "Search files"
+        detail = shorten_path(str(args.get("SearchPath") or args.get("SearchDirectory") or ""))
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": tool or "search",
+            "label": label,
+            "detail": detail,
+        }
+
+    if tool == "send_message":
+        msg = str(args.get("Message") or "").strip()
+        first_line = next((ln.lstrip("# ").strip() for ln in msg.splitlines() if ln.strip()), "")
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": "send_message",
+            "label": "Sent report to parent",
+            "detail": truncate_text(first_line, 80),
+        }
+
+    if tool == "invoke_subagent" or step.type == 127:
+        role = str(args.get("Role") or args.get("TypeName") or "subagent").strip().strip('"')
+        tname = str(args.get("TypeName") or "").strip().strip('"')
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": "invoke_subagent",
+            "label": f"Spawned: {truncate_text(role, 44)}",
+            "detail": tname,
+        }
+
+    if tool == "call_mcp_tool" or step.type == 38:
+        srv = str(args.get("ServerName") or "").strip()
+        tn = str(args.get("ToolName") or "").strip()
+        target = f"{srv}/{tn}".strip("/") or "mcp"
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": "call_mcp_tool",
+            "label": f"MCP: {target}",
+            "detail": "",
+        }
+
+    if tool:
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": tool,
+            "label": f"Tool: {tool}",
+            "detail": "",
+        }
+
+    if step.type == 23:
+        ck = step.payload(STEP_CHECKPOINT)
+        num = (ck.int(1) + 1) if ck is not None else 1
+        intent = (ck.str(4) if ck is not None else "").strip()
+        return {
+            "idx": step.pos,
+            "status": status_name,
+            "tool": "checkpoint",
+            "label": f"Compacted context (Checkpoint #{num})",
+            "detail": truncate_text(intent, 72),
+        }
+
+    if step.type == 15:
+        pr = step.payload(STEP_PLANNER_RESPONSE)
+        text = (pr.str(1) or pr.str(8) or "").strip() if pr is not None else ""
+        first_line = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
+        if step.status == STATUS_GENERATING:
+            return {
+                "idx": step.pos,
+                "status": "generating",
+                "tool": "response",
+                "label": "Generating response…",
+                "detail": truncate_text(first_line, 72),
+            }
+        if first_line:
+            return {
+                "idx": step.pos,
+                "status": status_name,
+                "tool": "response",
+                "label": f"Response: {truncate_text(first_line, 44)}",
+                "detail": truncate_text(first_line, 80),
+            }
+    return None
+
+
+UUID_RE = re.compile(r'"conversationId"\s*:\s*"([0-9a-fA-F-]{36})"')
+
+
+def discover_subagents(conv_id: str, steps: list[Step], conv_dir: Path) -> list[dict]:
+    found: dict[str, dict] = {}
+    order = 0
+
+    for step in steps:
+        tool, args = extract_tool_call(step)
+        if tool != "invoke_subagent" and step.type != 127:
+            continue
+        sub_id = ""
+        if step.generic_pb is not None:
+            res = step.generic_pb.msg(2)
+            out_text = res.str(1) if res is not None else ""
+            m = UUID_RE.search(out_text)
+            if m:
+                sub_id = m.group(1)
+        if not sub_id:
+            continue
+        role = str(args.get("Role") or "").strip().strip('"')
+        type_name = str(args.get("TypeName") or "").strip().strip('"')
+        if sub_id not in found:
+            found[sub_id] = {
+                "conversation_id": sub_id,
+                "parent_conversation_id": conv_id,
+                "root_conversation_id": conv_id,
+                "nesting_depth": 1,
+                "role": role,
+                "type_name": type_name,
+                "created_at": 0,
+                "_order": order,
+            }
+            order += 1
+
+    if conv_dir.is_dir():
+        for other_db in sorted(conv_dir.glob("*.db"), key=lambda p: p.stat().st_mtime):
+            sub_id = other_db.stem
+            if sub_id == conv_id:
+                continue
+            tmb, _, _ = load_meta(other_db)
+            if tmb is None:
+                continue
+            p_id = tmb.str(5)
+            r_id = tmb.str(6)
+            if p_id != conv_id and r_id != conv_id:
+                continue
+            lineage = parse_trajectory_lineage(tmb, sub_id)
+            sinfo = lineage["subagent_info"] or {}
+            entry = found.get(sub_id)
+            if entry is None:
+                found[sub_id] = {
+                    "conversation_id": sub_id,
+                    "parent_conversation_id": p_id or conv_id,
+                    "root_conversation_id": r_id or conv_id,
+                    "nesting_depth": sinfo.get("nesting_depth") or 1,
+                    "role": sinfo.get("role") or "",
+                    "type_name": sinfo.get("type_name") or "",
+                    "created_at": lineage["created_at"],
+                    "_order": order,
+                }
+                order += 1
+            else:
+                if not entry["role"] and sinfo.get("role"):
+                    entry["role"] = sinfo["role"]
+                if not entry["type_name"] and sinfo.get("type_name"):
+                    entry["type_name"] = sinfo["type_name"]
+                if sinfo.get("nesting_depth"):
+                    entry["nesting_depth"] = sinfo["nesting_depth"]
+                if lineage["created_at"]:
+                    entry["created_at"] = lineage["created_at"]
+
+    return sorted(found.values(), key=lambda x: (x["created_at"] or float("inf"), x["_order"]))
+
+
+def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
+    sub_id = meta["conversation_id"]
+    db_path = conv_dir / f"{sub_id}.db"
+    if not db_path.is_file():
+        return {
+            "conversation_id": sub_id,
+            "parent_conversation_id": meta["parent_conversation_id"],
+            "nesting_depth": meta["nesting_depth"],
+            "role": meta["role"],
+            "type_name": meta["type_name"],
+            "model": "Unknown Model",
+            "state": "starting",
+            "termination_reason": "",
+            "has_reported": False,
+            "step_count": 0,
+            "created_at": meta["created_at"],
+            "last_active_at": meta["created_at"],
+            "duration_seconds": 0,
+            "used_tokens": 0,
+            "limit_tokens": 0,
+            "used_pct": 0.0,
+            "request_budget_tokens": 0,
+            "budget_pct": 0.0,
+            "checkpoint_count": 0,
+            "compacted": False,
+            "current_action": "Initializing…",
+            "recent_steps": [],
+        }
+
+    steps, gen = load(db_path)
+    tmb, term_reason_code, term_step_idx = load_meta(db_path)
+    lineage = parse_trajectory_lineage(tmb, sub_id)
+    sinfo = lineage["subagent_info"] or {}
+    role = meta["role"] or sinfo.get("role") or ""
+    type_name = meta["type_name"] or sinfo.get("type_name") or ""
+    nesting_depth = sinfo.get("nesting_depth") or meta["nesting_depth"] or 1
+
+    m_id = model_id(gen)
+    cat_entry = catalog.get(m_id) or {}
+    limit = int(cat_entry.get("maxTokens") or 0) or context_limit(gen)
+    model = cat_entry.get("displayName") or model_name(gen)
+    st = collect_stats(steps, gen, limit)
+    req_budget = request_budget(gen) or (256_000 if limit > 256_000 else limit)
+    budget_pct = round(min(100.0, pct(st["total"], req_budget)), 1) if req_budget else 0.0
+
+    start_ts, end_ts, duration = step_timestamps(steps, lineage["created_at"] or meta["created_at"])
+
+    summaries = []
+    has_reported = False
+    for s in steps:
+        summary = summarize_step(s)
+        if summary is not None:
+            summaries.append(summary)
+            if summary["tool"] == "send_message" and s.status == STATUS_DONE:
+                has_reported = True
+
+    last_step = steps[-1] if steps else None
+    term_reason = TERM_REASON_NAMES.get(term_reason_code, "")
+    executor_active = bool(steps and (term_step_idx < 0 or term_step_idx < len(steps) - 1))
+
+    if last_step is not None and last_step.status == STATUS_GENERATING:
+        state = "generating"
+    elif last_step is not None and last_step.status in (STATUS_PENDING, STATUS_RUNNING, STATUS_WAITING):
+        state = "running"
+    elif last_step is not None and last_step.status in (STATUS_ERROR, STATUS_INVALID):
+        state = "error"
+    elif last_step is not None and last_step.status in (STATUS_CANCELED, STATUS_INTERRUPTED, STATUS_HALTED):
+        state = "canceled"
+    elif term_reason_code == 1:
+        state = "error"
+    elif has_reported:
+        state = "reported"
+    elif term_reason_code == 2:
+        state = "canceled"
+    elif executor_active:
+        state = "running"
+    elif not steps:
+        state = "starting"
+    else:
+        state = "idle"
+
+    if state == "generating":
+        current_action = "Generating response…"
+    elif summaries:
+        if (
+            len(summaries) >= 2
+            and summaries[-1]["tool"] == "response"
+            and summaries[-2]["tool"] == "send_message"
+        ):
+            current_action = summaries[-2]["label"]
+        else:
+            current_action = summaries[-1]["label"]
+    elif not steps:
+        current_action = "Initializing…"
+    else:
+        current_action = "Idle"
+
+    return {
+        "conversation_id": sub_id,
+        "parent_conversation_id": lineage["parent_conversation_id"] or meta["parent_conversation_id"],
+        "nesting_depth": nesting_depth,
+        "role": role,
+        "type_name": type_name,
+        "model": model,
+        "state": state,
+        "termination_reason": term_reason,
+        "has_reported": has_reported,
+        "step_count": len(steps),
+        "created_at": start_ts,
+        "last_active_at": end_ts,
+        "duration_seconds": duration,
+        "used_tokens": st["total"],
+        "limit_tokens": limit,
+        "used_pct": round(min(100.0, pct(st["total"], limit)), 1),
+        "request_budget_tokens": req_budget,
+        "budget_pct": budget_pct,
+        "checkpoint_count": len(st["checkpoints"]),
+        "compacted": st["compacted"],
+        "current_action": current_action,
+        "recent_steps": summaries[-4:],
+    }
 
 
 # Native context windows from the model catalog, which the CLI fetches from the server
@@ -780,23 +1312,33 @@ def main():
         raise SystemExit(f"Conversation database not found: {db_path}")
 
     steps, gen = load(db_path)
-    catalog_entry = {}
+    tmb, _, _ = load_meta(db_path)
+    lineage = parse_trajectory_lineage(tmb, conv_id)
+
+    catalog = {}
     if args.model_catalog:
         with open(args.model_catalog, encoding="utf-8") as fh:
-            catalog_entry = json.load(fh).get(model_id(gen)) or {}
+            catalog = json.load(fh)
+    catalog_entry = catalog.get(model_id(gen)) or {}
     limit = args.limit if args.limit > 0 else int(catalog_entry.get("maxTokens") or 0) or context_limit(gen)
     st = collect_stats(steps, gen, limit)
     model = catalog_entry.get("displayName") or model_name(gen)
     system_files = detect_system_files(os.path.expanduser("~"), args.workspace, args.app_dir)
 
+    subagent_metas = discover_subagents(conv_id, steps, db_path.parent)
+    subagents = [collect_subagent_summary(m, db_path.parent, catalog) for m in subagent_metas]
+
     if args.json:
         print(json.dumps({
             "conversation_id": conv_id,
+            "parent_conversation_id": lineage["parent_conversation_id"],
+            "root_conversation_id": lineage["root_conversation_id"],
+            "subagent_info": lineage["subagent_info"],
             "model": model,
             "heading": stats_heading(st),
             "grid_segments": grid_segments(st),
             "checkpoint_view": checkpoint_view(st),
-            "text": render(st, model, system_files, args.width, False),
+            "text": render(st, model, system_files, args.width, False, subagents),
             "model_id": model_id(gen),
             "request_budget_tokens": request_budget(gen),
             "used_tokens": st["total"],
@@ -817,10 +1359,11 @@ def main():
             "artifact_files": [{"path": p, "tokens": t} for p, t in st["artifact_files"]],
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
+            "subagents": subagents,
         }, indent=2))
         return
 
-    print(render(st, model, system_files, args.width, args.color))
+    print(render(st, model, system_files, args.width, args.color, subagents))
 
 
 if __name__ == "__main__":

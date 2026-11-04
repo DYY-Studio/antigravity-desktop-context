@@ -58,7 +58,35 @@ class ConversationDB:
             "task_details blob, render_info blob, step_payload blob, step_format integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))"
         )
         self.conn.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))")
+        self.conn.execute("CREATE TABLE trajectory_metadata_blob (id text DEFAULT 'main', data blob, PRIMARY KEY (id))")
+        self.conn.execute("CREATE TABLE executor_metadata (idx integer, data blob, PRIMARY KEY (idx))")
         self.n = 0
+
+    def trajectory_meta(
+        self,
+        parent_id: str = "",
+        root_id: str = "",
+        role: str = "",
+        type_name: str = "",
+        created_at: int = 0,
+        nesting_depth: int = 1,
+    ):
+        parts = []
+        if created_at:
+            parts.append(f(2, f(1, created_at)))
+        if parent_id:
+            parts.append(f(5, parent_id))
+        if root_id:
+            parts.append(f(6, root_id))
+        if role or type_name:
+            parts.append(f(8, m(f(1, type_name), f(2, role))))
+        if parent_id and nesting_depth:
+            parts.append(f(17, nesting_depth))
+        self.conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)", (m(*parts),))
+
+    def executor_meta(self, term_reason: int = 4, last_step_idx: int = 0):
+        data = m(f(1, term_reason), f(3, last_step_idx))
+        self.conn.execute("INSERT INTO executor_metadata (idx, data) VALUES ((SELECT COUNT(*) FROM executor_metadata), ?)", (data,))
 
     def step(self, step_type: int, metadata: bytes = b"", payload_field: int | None = None, payload: bytes = b"", status: int = 3):
         pb = m(f(1, step_type), f(4, status), f(5, metadata), f(payload_field, payload) if payload_field else b"")
@@ -339,6 +367,120 @@ class ReportTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertEqual(lines[2], "Test Model · 300/200.0k tokens")  # stats above the grid
         self.assertTrue(lines[-3].startswith("□"))
+
+    # --- subagents ---
+
+    def test_subagent_discovery_and_summary(self):
+        self.basic_steps()
+        sub1_id = "11111111-2222-3333-4444-555555555555"
+        sub2_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Parent step invokes sub1
+        invoke_args = json.dumps({"Role": "Codebase Researcher", "TypeName": "research", "Prompt": "inspect files"})
+        invoke_out = f'Created the following subagent:\n{{\n  "conversationId": "{sub1_id}"\n}}'
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "invoke_subagent"), f(3, invoke_args))),
+            payload_field=140,
+            payload=f(2, f(1, invoke_out)),
+        )
+        self.db.generation([group(1, 500), group(7, 300, ("0: USER_INPUT", 300))], max_context=256_000, model="gemini-4-argon-high")
+
+        # Subagent 1: completed and reported back after 1 compaction
+        sub1 = ConversationDB(self.home / f"{sub1_id}.db")
+        sub1.trajectory_meta(parent_id="conv", root_id="conv", role="Codebase Researcher", type_name="research", created_at=1000)
+        sub1.step(
+            GENERIC,
+            metadata=m(f(1, f(1, 1005)), f(4, m(f(2, "read_file"), f(3, json.dumps({"Path": "/repo/app/main.py", "StartLine": 1, "EndLine": 50}))))),
+        )
+        sub1.step(CHECKPOINT, payload_field=P_CHECKPOINT, payload=m(f(1, 0), f(11, 0), f(12, 1), f(4, "Initial scan")))
+        sub1.step(
+            GENERIC,
+            metadata=m(
+                f(1, f(1, 1060)),
+                f(8, f(1, 1065)),
+                f(4, m(f(2, "send_message"), f(3, json.dumps({"Message": "# Audit Summary\nAll clean."})))),
+            ),
+        )
+        sub1.generation(
+            [group(1, 10_000), group(7, 41_200, ("0: USER_INPUT", 41_200))],
+            max_context=256_000,
+            checkpoint_index=0,
+            model="gemini-4-argon-high",
+            display_name="Gemini 4 Argon (High)",
+        )
+        sub1.executor_meta(term_reason=4, last_step_idx=2)
+        sub1.close()
+
+        # Subagent 2: discovered via trajectory_metadata_blob, currently generating
+        sub2 = ConversationDB(self.home / f"{sub2_id}.db")
+        sub2.trajectory_meta(parent_id="conv", root_id="conv", role="Security Auditor", type_name="research", created_at=1010)
+        sub2.step(
+            GENERIC,
+            metadata=m(
+                f(1, f(1, 1012)),
+                f(4, m(f(2, "run_command"), f(3, json.dumps({"CommandLine": "pytest -q", "toolSummary": "Run unit tests"})))),
+            ),
+        )
+        sub2.step(
+            PLANNER_RESPONSE,
+            metadata=f(1, f(1, 1030)),
+            payload_field=P_PLANNER,
+            payload=planner("Checking test output..."),
+            status=8,  # GENERATING
+        )
+        sub2.generation(
+            [group(1, 8_000), group(7, 200_000, ("0: USER_INPUT", 200_000))],
+            max_context=256_000,
+            model="gemini-4-argon-high",
+            display_name="Gemini 4 Argon (High)",
+        )
+        sub2.close()
+
+        r = self.report()
+        self.assertEqual(len(r["subagents"]), 2)
+
+        s1, s2 = r["subagents"][0], r["subagents"][1]
+        self.assertEqual(s1["conversation_id"], sub1_id)
+        self.assertEqual(s1["role"], "Codebase Researcher")
+        self.assertEqual(s1["type_name"], "research")
+        self.assertEqual(s1["state"], "reported")
+        self.assertTrue(s1["has_reported"])
+        self.assertEqual(s1["used_tokens"], 51_200)
+        self.assertEqual(s1["request_budget_tokens"], 256_000)
+        self.assertEqual(s1["budget_pct"], 20.0)
+        self.assertEqual(s1["checkpoint_count"], 1)
+        self.assertEqual(s1["duration_seconds"], 65)
+        self.assertEqual(s1["current_action"], "Sent report to parent")
+        self.assertEqual(s1["recent_steps"][0]["label"], "Read main.py (L1-50)")
+
+        self.assertEqual(s2["conversation_id"], sub2_id)
+        self.assertEqual(s2["role"], "Security Auditor")
+        self.assertEqual(s2["state"], "generating")
+        self.assertEqual(s2["used_tokens"], 208_000)
+        self.assertEqual(s2["budget_pct"], 81.2)
+        self.assertEqual(s2["current_action"], "Generating response…")
+        self.assertIn("Subagents (2)", r["text"])
+        self.assertIn("[REPORTED] Codebase Researcher (research): 51.2k/256.0k budget (20.0%)", r["text"])
+        self.assertIn("[GENERATING] Security Auditor (research): 208.0k/256.0k budget (81.2%)", r["text"])
+
+    def test_subagent_direct_report_lineage(self):
+        self.db.trajectory_meta(
+            parent_id="parent-uuid-1234",
+            root_id="root-uuid-5678",
+            role="Database Debugger",
+            type_name="self",
+            created_at=2000,
+            nesting_depth=2,
+        )
+        self.basic_steps()
+        r = self.report()
+        self.assertEqual(r["parent_conversation_id"], "parent-uuid-1234")
+        self.assertEqual(r["root_conversation_id"], "root-uuid-5678")
+        self.assertEqual(
+            r["subagent_info"],
+            {"type_name": "self", "role": "Database Debugger", "nesting_depth": 2},
+        )
 
 
 class FormatTest(unittest.TestCase):

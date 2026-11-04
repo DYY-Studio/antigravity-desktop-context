@@ -77,15 +77,17 @@
   .usage .big { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
   .usage .of { color: var(--dim); }
   .usage .pct { margin-left: auto; font-size: 13px; font-weight: 600; }
-  .budget-line {
+  .budget-line, .cache-line {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     font-size: 11.5px;
     color: var(--dim);
-    margin-bottom: 10px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
   }
+  .grid { margin-top: 6px; }
   button {
     font: inherit; font-size: 12px; color: var(--dim); cursor: pointer; white-space: nowrap;
     background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px;
@@ -388,6 +390,15 @@
     </div>`;
   }
 
+  function cacheLine(r) {
+    const cs = r.cache_stats;
+    if (!cs || !cs.turns) return '';
+    return `<div class="cache-line num" title="Latest turn cache read / prompt tokens (hit rate) · Cumulative session cache read across ${cs.turns} LLM turn(s)">
+      <span>Cache read: <strong>${fmtTok(cs.last_cache_read_tokens)}</strong>/${fmtTok(cs.last_prompt_tokens)} (${cs.last_hit_pct.toFixed(1)}%)</span>
+      <span>Σ <strong>${fmtTok(cs.total_cache_read_tokens)}</strong> (${cs.total_hit_pct.toFixed(1)}% · ${cs.turns}t)</span>
+    </div>`;
+  }
+
   function subagentCard(s) {
     const id = s.conversation_id;
     const role = s.role || s.type_name || id.slice(0, 8);
@@ -401,6 +412,12 @@
     if (s.type_name && s.role) metaParts.push(s.type_name);
     metaParts.push(`${s.step_count || 0} steps`);
     if (dur) metaParts.push(dur);
+
+    const cs = s.cache_stats;
+    const cacheRow = cs && cs.turns ? `<div class="sub-stats num" title="Latest turn cache read (hit rate) · Cumulative cache read across ${cs.turns} turn(s)">
+      <span>Cache read: <strong>${fmtTok(cs.last_cache_read_tokens)}</strong> (${cs.last_hit_pct.toFixed(1)}%)</span>
+      <span>Total: <strong>${fmtTok(cs.total_cache_read_tokens)}</strong> (${cs.total_hit_pct.toFixed(1)}% · ${cs.turns}t)</span>
+    </div>` : '';
 
     const steps = Array.isArray(s.recent_steps) ? s.recent_steps : [];
     const isOpen = openStepDetails.has(id) ? ' open' : '';
@@ -429,6 +446,7 @@
           <span><strong>${fmtTok(s.used_tokens)}</strong> / ${budget ? `${fmtTok(budget)} (${pctVal.toFixed(1)}%)` : `${fmtTok(s.limit_tokens)}`}${s.checkpoint_count ? ` · <span class="ck-tag">Compacted ×${s.checkpoint_count}</span>` : ''}</span>
           <span>${esc(metaParts.join(' · '))}</span>
         </div>
+        ${cacheRow}
       </div>
       <div class="sub-activity">
         <span class="sub-act-text" title="${esc(s.current_action)}">${esc(s.current_action || 'Idle')}</span>
@@ -500,6 +518,7 @@
         ${limit ? `<span class="pct num">${r.used_pct.toFixed(1)}%</span>` : ''}
       </div>
       ${budgetLine(r)}
+      ${cacheLine(r)}
       ${grid(r)}
       ${categories(r)}
       ${subagentsSection(r)}

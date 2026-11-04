@@ -553,6 +553,65 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     return st
 
 
+def empty_cache_stats() -> dict:
+    return {
+        "turns": 0,
+        "last_input_tokens": 0,
+        "last_cache_read_tokens": 0,
+        "last_prompt_tokens": 0,
+        "last_hit_pct": 0.0,
+        "total_input_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_prompt_tokens": 0,
+        "total_hit_pct": 0.0,
+    }
+
+
+def collect_cache_stats(steps: list[Step], gen: Msg | None = None) -> dict:
+    turns = 0
+    total_input = 0
+    total_cache_read = 0
+    last_input = 0
+    last_cache_read = 0
+
+    for s in steps:
+        u = s.md.msg(9)
+        if u is None:
+            continue
+        inp, out_tok, cache = u.int(2), u.int(3), u.int(5)
+        if inp > 0 or out_tok > 0 or cache > 0:
+            turns += 1
+            total_input += inp
+            total_cache_read += cache
+            last_input = inp
+            last_cache_read = cache
+
+    chat = gen.msg(1) if gen is not None else None
+    gen_u = chat.msg(4) if chat is not None else None
+    if gen_u is not None:
+        g_in, g_out, g_cache = gen_u.int(2), gen_u.int(3), gen_u.int(5)
+        if (g_in > 0 or g_out > 0 or g_cache > 0) and (g_in, g_cache) != (last_input, last_cache_read):
+            turns += 1
+            total_input += g_in
+            total_cache_read += g_cache
+            last_input = g_in
+            last_cache_read = g_cache
+
+    last_prompt = last_input + last_cache_read
+    total_prompt = total_input + total_cache_read
+    return {
+        "turns": turns,
+        "last_input_tokens": last_input,
+        "last_cache_read_tokens": last_cache_read,
+        "last_prompt_tokens": last_prompt,
+        "last_hit_pct": round(pct(last_cache_read, last_prompt), 1),
+        "total_input_tokens": total_input,
+        "total_cache_read_tokens": total_cache_read,
+        "total_prompt_tokens": total_prompt,
+        "total_hit_pct": round(pct(total_cache_read, total_prompt), 1),
+    }
+
+
 # --- rendering ---------------------------------------------------------------
 
 CATEGORIES = [
@@ -711,9 +770,15 @@ def render_subagents(subagents: list[dict]) -> str:
         ck = f" · Compacted ×{s['checkpoint_count']}" if s.get("checkpoint_count") else ""
         dur = fmt_duration(s.get("duration_seconds", 0))
         dur_str = f" · {dur}" if dur else ""
+        cs = s.get("cache_stats") or {}
+        cache_str = (
+            f" · cache {fmt_tok(cs['last_cache_read_tokens'])} ({cs['last_hit_pct']:.1f}%)"
+            if cs.get("total_cache_read_tokens", 0) > 0
+            else ""
+        )
         action = f" — {s['current_action']}" if s.get("current_action") else ""
         out.append(
-            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{action}\n"
+            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{cache_str}{action}\n"
         )
     return "".join(out)
 
@@ -1117,6 +1182,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
             "budget_pct": 0.0,
             "checkpoint_count": 0,
             "compacted": False,
+            "cache_stats": empty_cache_stats(),
             "current_action": "Initializing…",
             "recent_steps": [],
         }
@@ -1134,6 +1200,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
     limit = int(cat_entry.get("maxTokens") or 0) or context_limit(gen)
     model = cat_entry.get("displayName") or model_name(gen)
     st = collect_stats(steps, gen, limit)
+    cache_stats = collect_cache_stats(steps, gen)
     req_budget = request_budget(gen) or (256_000 if limit > 256_000 else limit)
     budget_pct = round(min(100.0, pct(st["total"], req_budget)), 1) if req_budget else 0.0
 
@@ -1210,6 +1277,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
         "budget_pct": budget_pct,
         "checkpoint_count": len(st["checkpoints"]),
         "compacted": st["compacted"],
+        "cache_stats": cache_stats,
         "current_action": current_action,
         "recent_steps": summaries[-4:],
     }
@@ -1322,6 +1390,7 @@ def main():
     catalog_entry = catalog.get(model_id(gen)) or {}
     limit = args.limit if args.limit > 0 else int(catalog_entry.get("maxTokens") or 0) or context_limit(gen)
     st = collect_stats(steps, gen, limit)
+    cache_stats = collect_cache_stats(steps, gen)
     model = catalog_entry.get("displayName") or model_name(gen)
     system_files = detect_system_files(os.path.expanduser("~"), args.workspace, args.app_dir)
 
@@ -1348,6 +1417,7 @@ def main():
             "has_breakdown": st["has_breakdown"],
             "compacted": st["compacted"],
             "checkpoint_buffer": st["checkpoint"],
+            "cache_stats": cache_stats,
             "categories": [
                 {"icon": icon, "name": name, "key": key, "tokens": st[key], "pct": round(pct(st[key], limit), 1)}
                 for icon, name, key, always in CATEGORIES

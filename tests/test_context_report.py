@@ -402,9 +402,16 @@ class ReportTest(unittest.TestCase):
                 f(4, m(f(2, "send_message"), f(3, json.dumps({"Message": "# Audit Summary\nAll clean."})))),
             ),
         )
+        sub1.step(
+            PLANNER_RESPONSE,
+            metadata=m(f(1, f(1, 1066)), f(9, usage(10_000, 500, 40_000))),
+            payload_field=P_PLANNER,
+            payload=planner("Done."),
+        )
         sub1.generation(
             [group(1, 10_000), group(7, 41_200, ("0: USER_INPUT", 41_200))],
             max_context=256_000,
+            usage=usage(10_000, 500, 40_000),
             checkpoint_index=0,
             model="gemini-4-argon-high",
             display_name="Gemini 4 Argon (High)",
@@ -450,9 +457,26 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(s1["request_budget_tokens"], 256_000)
         self.assertEqual(s1["budget_pct"], 20.0)
         self.assertEqual(s1["checkpoint_count"], 1)
-        self.assertEqual(s1["duration_seconds"], 65)
+        self.assertEqual(s1["duration_seconds"], 66)
         self.assertEqual(s1["current_action"], "Sent report to parent")
         self.assertEqual(s1["recent_steps"][0]["label"], "Read main.py (L1-50)")
+        self.assertEqual(
+            s1["cache_stats"],
+            {
+                "turns": 1,
+                "last_input_tokens": 10_000,
+                "last_cache_read_tokens": 40_000,
+                "last_prompt_tokens": 50_000,
+                "last_hit_pct": 80.0,
+                "total_input_tokens": 10_000,
+                "total_cache_read_tokens": 40_000,
+                "total_prompt_tokens": 50_000,
+                "total_hit_pct": 80.0,
+            },
+        )
+        self.assertEqual(r["cache_stats"]["turns"], 1)
+        self.assertEqual(r["cache_stats"]["last_input_tokens"], 900)
+        self.assertEqual(r["cache_stats"]["last_cache_read_tokens"], 0)
 
         self.assertEqual(s2["conversation_id"], sub2_id)
         self.assertEqual(s2["role"], "Security Auditor")

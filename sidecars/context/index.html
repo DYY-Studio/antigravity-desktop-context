@@ -77,7 +77,7 @@
   .usage .big { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
   .usage .of { color: var(--dim); }
   .usage .pct { margin-left: auto; font-size: 13px; font-weight: 600; }
-  .budget-line, .cache-line {
+  .budget-line, .cache-line, .tps-line {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -323,6 +323,22 @@
     return m ? `${h}h ${m}m` : `${h}h`;
   }
 
+  function fmtSec(sec) {
+    const v = Number(sec || 0);
+    if (v <= 0) return '0s';
+    if (v < 10) return `${v.toFixed(1).replace(/\.0$/, '')}s`;
+    if (v < 60) return `${Math.round(v)}s`;
+    const total = Math.round(v);
+    if (total < 3600) {
+      const m = Math.floor(total / 60);
+      const s = total % 60;
+      return s ? `${m}m${s}s` : `${m}m`;
+    }
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    return m ? `${h}h${m}m` : `${h}h`;
+  }
+
   // The CLI's cell allocation: at least one cell per non-empty segment, scaled down on overflow.
   function gridCells(segments, limit, total) {
     let counts = segments.map((t) => (!t || !limit ? 0 : Math.max(1, Math.floor(t / limit * total))));
@@ -399,6 +415,19 @@
     </div>`;
   }
 
+  function tpsLine(r) {
+    const os = r.output_stats;
+    if (!os || !os.turns || !os.last_tps) return '';
+    const breakdown = os.last_thinking_tokens
+      ? ` (${fmtTok(os.last_thinking_tokens)} think + ${fmtTok(os.last_response_tokens)} resp)`
+      : '';
+    const tip = `Latest turn: ${fmtTok(os.last_output_tokens)} out${breakdown} in ${os.last_duration_seconds.toFixed(2)}s (TTFT ${os.last_ttft_seconds.toFixed(2)}s + stream ${os.last_stream_seconds.toFixed(2)}s) · Session avg: ${os.avg_tps.toFixed(1)} tok/s across ${os.turns} turn(s) (${fmtTok(os.total_output_tokens)} out in ${os.total_duration_seconds.toFixed(1)}s)`;
+    return `<div class="tps-line num" title="${esc(tip)}">
+      <span>Output: <strong>${os.last_tps.toFixed(1)} tok/s</strong> (TTFT ${fmtSec(os.last_ttft_seconds)}/${fmtSec(os.last_duration_seconds)})</span>
+      <span>Avg <strong>${os.avg_tps.toFixed(1)}</strong> · Σ ${fmtTok(os.total_output_tokens)}</span>
+    </div>`;
+  }
+
   function subagentCard(s) {
     const id = s.conversation_id;
     const role = s.role || s.type_name || id.slice(0, 8);
@@ -417,6 +446,12 @@
     const cacheRow = cs && cs.turns ? `<div class="sub-stats num" title="Latest turn cache read (hit rate) · Cumulative cache read across ${cs.turns} turn(s)">
       <span>Cache read: <strong>${fmtTok(cs.last_cache_read_tokens)}</strong> (${cs.last_hit_pct.toFixed(1)}%)</span>
       <span>Total: <strong>${fmtTok(cs.total_cache_read_tokens)}</strong> (${cs.total_hit_pct.toFixed(1)}% · ${cs.turns}t)</span>
+    </div>` : '';
+
+    const os = s.output_stats;
+    const tpsRow = os && os.turns && os.last_tps ? `<div class="sub-stats num" title="Latest turn: ${fmtTok(os.last_output_tokens)} out in ${os.last_duration_seconds.toFixed(2)}s (TTFT ${os.last_ttft_seconds.toFixed(2)}s + stream ${os.last_stream_seconds.toFixed(2)}s) · Cumulative avg across ${os.turns} turn(s)">
+      <span>TPS: <strong>${os.last_tps.toFixed(1)}</strong> (TTFT ${fmtSec(os.last_ttft_seconds)}/${fmtSec(os.last_duration_seconds)})</span>
+      <span>Avg: <strong>${os.avg_tps.toFixed(1)}</strong> (${fmtTok(os.total_output_tokens)})</span>
     </div>` : '';
 
     const steps = Array.isArray(s.recent_steps) ? s.recent_steps : [];
@@ -447,6 +482,7 @@
           <span>${esc(metaParts.join(' · '))}</span>
         </div>
         ${cacheRow}
+        ${tpsRow}
       </div>
       <div class="sub-activity">
         <span class="sub-act-text" title="${esc(s.current_action)}">${esc(s.current_action || 'Idle')}</span>
@@ -519,6 +555,7 @@
       </div>
       ${budgetLine(r)}
       ${cacheLine(r)}
+      ${tpsLine(r)}
       ${grid(r)}
       ${categories(r)}
       ${subagentsSection(r)}

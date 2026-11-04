@@ -122,8 +122,13 @@ def planner(text: str) -> bytes:
     return f(1, text)
 
 
-def usage(input_tokens: int = 0, output: int = 0, cache_read: int = 0) -> bytes:
-    return m(f(2, input_tokens), f(3, output), f(5, cache_read))
+def usage(input_tokens: int = 0, output: int = 0, cache_read: int = 0, thinking: int = 0, response: int = 0) -> bytes:
+    parts = [f(2, input_tokens), f(3, output), f(5, cache_read)]
+    if thinking:
+        parts.append(f(9, thinking))
+    if response:
+        parts.append(f(10, response))
+    return m(*parts)
 
 
 def tool_call(args: str) -> bytes:
@@ -404,14 +409,19 @@ class ReportTest(unittest.TestCase):
         )
         sub1.step(
             PLANNER_RESPONSE,
-            metadata=m(f(1, f(1, 1066)), f(9, usage(10_000, 500, 40_000))),
+            metadata=m(
+                f(1, f(1, 1061)),
+                f(6, m(f(1, 1062), f(2, 500_000_000))),
+                f(7, f(1, 1066)),
+                f(9, usage(10_000, 500, 40_000, thinking=300, response=200)),
+            ),
             payload_field=P_PLANNER,
             payload=planner("Done."),
         )
         sub1.generation(
             [group(1, 10_000), group(7, 41_200, ("0: USER_INPUT", 41_200))],
             max_context=256_000,
-            usage=usage(10_000, 500, 40_000),
+            usage=usage(10_000, 500, 40_000, thinking=300, response=200),
             checkpoint_index=0,
             model="gemini-4-argon-high",
             display_name="Gemini 4 Argon (High)",
@@ -477,6 +487,23 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(r["cache_stats"]["turns"], 1)
         self.assertEqual(r["cache_stats"]["last_input_tokens"], 900)
         self.assertEqual(r["cache_stats"]["last_cache_read_tokens"], 0)
+        self.assertEqual(
+            s1["output_stats"],
+            {
+                "turns": 1,
+                "last_output_tokens": 500,
+                "last_thinking_tokens": 300,
+                "last_response_tokens": 200,
+                "last_ttft_seconds": 1.5,
+                "last_stream_seconds": 3.5,
+                "last_duration_seconds": 5.0,
+                "last_tps": 100.0,
+                "total_output_tokens": 500,
+                "total_duration_seconds": 5.0,
+                "avg_tps": 100.0,
+            },
+        )
+        self.assertIn("100.0 tok/s", r["text"])
 
         self.assertEqual(s2["conversation_id"], sub2_id)
         self.assertEqual(s2["role"], "Security Auditor")

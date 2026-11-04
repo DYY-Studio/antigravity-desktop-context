@@ -211,7 +211,7 @@ async function report(conversationId, workspaceUri, targetId) {
   const workspace = workspacePath(workspaceUri);
   const cached = cache.get(activeId);
   const subSig = subagentCacheSignature(activeId, liveSummaries, cached?.report?.subagents);
-  const key = [fileStamp(db), fileStamp(`${db}-wal`), workspace, fileStamp(CATALOG_PATH), subSig, hostId].join('|');
+  const key = [fileStamp(db), fileStamp(`${db}-wal`), fileStamp(SCRIPT), workspace, fileStamp(CATALOG_PATH), subSig, hostId].join('|');
   if (cached && cached.key === key) return cached.report;
 
   const { cmd, pre } = await findPython();

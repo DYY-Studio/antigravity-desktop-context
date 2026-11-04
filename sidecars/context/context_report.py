@@ -553,6 +553,12 @@ def collect_stats(steps: list[Step], gen: Msg | None, limit: int) -> dict:
     return st
 
 
+def pb_seconds(m: Msg | None) -> float:
+    if m is None:
+        return 0.0
+    return m.int(1) + m.int(2) / 1_000_000_000.0
+
+
 def empty_cache_stats() -> dict:
     return {
         "turns": 0,
@@ -609,6 +615,109 @@ def collect_cache_stats(steps: list[Step], gen: Msg | None = None) -> dict:
         "total_cache_read_tokens": total_cache_read,
         "total_prompt_tokens": total_prompt,
         "total_hit_pct": round(pct(total_cache_read, total_prompt), 1),
+    }
+
+
+def empty_output_stats() -> dict:
+    return {
+        "turns": 0,
+        "last_output_tokens": 0,
+        "last_thinking_tokens": 0,
+        "last_response_tokens": 0,
+        "last_ttft_seconds": 0.0,
+        "last_stream_seconds": 0.0,
+        "last_duration_seconds": 0.0,
+        "last_tps": 0.0,
+        "total_output_tokens": 0,
+        "total_duration_seconds": 0.0,
+        "avg_tps": 0.0,
+    }
+
+
+def collect_output_stats(steps: list[Step], gen: Msg | None = None) -> dict:
+    turns = 0
+    total_out = 0
+    timed_out = 0
+    total_dur = 0.0
+    last_out = 0
+    last_think = 0
+    last_resp = 0
+    last_ttft = 0.0
+    last_stream = 0.0
+    last_dur = 0.0
+    last_sig = (0, 0, 0)
+    last_step_timed = False
+
+    for s in steps:
+        u = s.md.msg(9)
+        if u is None:
+            continue
+        inp, out_tok, cache = u.int(2), u.int(3), u.int(5)
+        if out_tok <= 0:
+            continue
+        think_tok, resp_tok = u.int(9), u.int(10)
+        total_out += out_tok
+        last_out = out_tok
+        last_think = think_tok
+        last_resp = resp_tok
+        last_sig = (inp, out_tok, cache)
+
+        t_create = pb_seconds(s.md.msg(1))
+        t_view = pb_seconds(s.md.msg(6))
+        t_end = pb_seconds(s.md.msg(7)) or pb_seconds(s.md.msg(8))
+        if t_create > 0.0 and t_end > t_create:
+            dur = t_end - t_create
+            ttft = max(0.0, min(dur, t_view - t_create)) if t_view >= t_create else 0.0
+            stream = max(0.0, dur - ttft)
+            turns += 1
+            timed_out += out_tok
+            total_dur += dur
+            last_ttft = ttft
+            last_stream = stream
+            last_dur = dur
+            last_step_timed = True
+        else:
+            last_step_timed = False
+
+    chat = gen.msg(1) if gen is not None else None
+    gen_u = chat.msg(4) if chat is not None else None
+    if gen_u is not None:
+        g_in, g_out, g_cache = gen_u.int(2), gen_u.int(3), gen_u.int(5)
+        g_ttft = pb_seconds(chat.msg(11))
+        g_stream = pb_seconds(chat.msg(12))
+        g_dur = g_ttft + g_stream
+        if g_out > 0 and (g_in, g_out, g_cache) != last_sig:
+            total_out += g_out
+            last_out = g_out
+            last_think = gen_u.int(9)
+            last_resp = gen_u.int(10)
+            if g_dur > 0.0:
+                turns += 1
+                timed_out += g_out
+                total_dur += g_dur
+                last_ttft = g_ttft
+                last_stream = g_stream
+                last_dur = g_dur
+        elif g_out > 0 and not last_step_timed and g_dur > 0.0:
+            turns += 1
+            timed_out += last_out
+            total_dur += g_dur
+            last_ttft = g_ttft
+            last_stream = g_stream
+            last_dur = g_dur
+
+    return {
+        "turns": turns,
+        "last_output_tokens": last_out,
+        "last_thinking_tokens": last_think,
+        "last_response_tokens": last_resp,
+        "last_ttft_seconds": round(last_ttft, 2),
+        "last_stream_seconds": round(last_stream, 2),
+        "last_duration_seconds": round(last_dur, 2),
+        "last_tps": round(last_out / last_dur, 1) if last_dur > 0.0 else 0.0,
+        "total_output_tokens": total_out,
+        "total_duration_seconds": round(total_dur, 2),
+        "avg_tps": round(timed_out / total_dur, 1) if total_dur > 0.0 else 0.0,
     }
 
 
@@ -776,9 +885,15 @@ def render_subagents(subagents: list[dict]) -> str:
             if cs.get("total_cache_read_tokens", 0) > 0
             else ""
         )
+        os_st = s.get("output_stats") or {}
+        tps_str = (
+            f" · {os_st['last_tps']:.1f} tok/s"
+            if os_st.get("last_tps", 0) > 0
+            else ""
+        )
         action = f" — {s['current_action']}" if s.get("current_action") else ""
         out.append(
-            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{cache_str}{action}\n"
+            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{cache_str}{tps_str}{action}\n"
         )
     return "".join(out)
 
@@ -1183,6 +1298,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
             "checkpoint_count": 0,
             "compacted": False,
             "cache_stats": empty_cache_stats(),
+            "output_stats": empty_output_stats(),
             "current_action": "Initializing…",
             "recent_steps": [],
         }
@@ -1201,6 +1317,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
     model = cat_entry.get("displayName") or model_name(gen)
     st = collect_stats(steps, gen, limit)
     cache_stats = collect_cache_stats(steps, gen)
+    output_stats = collect_output_stats(steps, gen)
     req_budget = request_budget(gen) or (256_000 if limit > 256_000 else limit)
     budget_pct = round(min(100.0, pct(st["total"], req_budget)), 1) if req_budget else 0.0
 
@@ -1278,6 +1395,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
         "checkpoint_count": len(st["checkpoints"]),
         "compacted": st["compacted"],
         "cache_stats": cache_stats,
+        "output_stats": output_stats,
         "current_action": current_action,
         "recent_steps": summaries[-4:],
     }
@@ -1391,6 +1509,7 @@ def main():
     limit = args.limit if args.limit > 0 else int(catalog_entry.get("maxTokens") or 0) or context_limit(gen)
     st = collect_stats(steps, gen, limit)
     cache_stats = collect_cache_stats(steps, gen)
+    output_stats = collect_output_stats(steps, gen)
     model = catalog_entry.get("displayName") or model_name(gen)
     system_files = detect_system_files(os.path.expanduser("~"), args.workspace, args.app_dir)
 
@@ -1418,6 +1537,7 @@ def main():
             "compacted": st["compacted"],
             "checkpoint_buffer": st["checkpoint"],
             "cache_stats": cache_stats,
+            "output_stats": output_stats,
             "categories": [
                 {"icon": icon, "name": name, "key": key, "tokens": st[key], "pct": round(pct(st[key], limit), 1)}
                 for icon, name, key, always in CATEGORIES

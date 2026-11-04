@@ -121,7 +121,7 @@ async function refreshCatalog() {
 
 // --- report -------------------------------------------------------------------
 
-const cache = new Map(); // conversationId -> { key, report }
+const cache = new Map(); // activeId -> { key, report }
 
 function workspacePath(uri) {
   if (!uri || !uri.startsWith('file:')) return '';
@@ -139,18 +139,79 @@ function fileStamp(path) {
   }
 }
 
-async function report(conversationId, workspaceUri) {
-  if (!UUID.test(conversationId || '')) {
+async function fetchLiveTrajectorySummaries() {
+  try {
+    const resp = await lsRequest('GetAllCascadeTrajectories', {});
+    return resp?.trajectorySummaries || resp?.response?.trajectorySummaries || {};
+  } catch {
+    return {};
+  }
+}
+
+function subagentCacheSignature(activeId, liveSummaries, cachedSubagents) {
+  const ids = new Set();
+  if (Array.isArray(cachedSubagents)) {
+    for (const s of cachedSubagents) {
+      if (s?.conversation_id) ids.add(s.conversation_id);
+    }
+  }
+  for (const [id, info] of Object.entries(liveSummaries)) {
+    const meta = info?.trajectoryMetadata;
+    if (meta?.parentConversationId === activeId || meta?.rootConversationId === activeId) {
+      ids.add(id);
+    }
+  }
+  const parts = [];
+  for (const id of Array.from(ids).sort()) {
+    const subDb = join(CONVERSATIONS, `${id}.db`);
+    const live = liveSummaries[id];
+    const liveSig = live ? `${live.status || ''}:${live.stepCount || 0}:${live.latestExecutorTerminationReason || ''}` : '';
+    parts.push(`${id}@${fileStamp(subDb)}@${fileStamp(`${subDb}-wal`)}@${liveSig}`);
+  }
+  return parts.join(';');
+}
+
+function mergeLiveSubagentStates(subagents, liveSummaries) {
+  if (!Array.isArray(subagents) || !subagents.length) return;
+  for (const s of subagents) {
+    const live = liveSummaries[s.conversation_id];
+    if (!live) continue;
+    const status = live.status || '';
+    const term = live.latestExecutorTerminationReason || '';
+    if (status === 'CASCADE_RUN_STATUS_RUNNING' && s.state !== 'generating') {
+      s.state = 'running';
+    } else if (status === 'CASCADE_RUN_STATUS_IDLE') {
+      if (term.endsWith('ERROR')) {
+        s.state = 'error';
+      } else if (s.has_reported) {
+        s.state = 'reported';
+      } else if (term.endsWith('USER_CANCELED')) {
+        s.state = 'canceled';
+      } else if (s.state === 'running' || s.state === 'generating') {
+        s.state = 'idle';
+      }
+    }
+  }
+}
+
+async function report(conversationId, workspaceUri, targetId) {
+  const hostId = UUID.test(conversationId || '') ? conversationId : '';
+  const activeId = UUID.test(targetId || '') ? targetId : hostId;
+  if (!activeId) {
     return { error: 'no-conversation' };
   }
-  const db = join(CONVERSATIONS, `${conversationId}.db`);
+  const db = join(CONVERSATIONS, `${activeId}.db`);
   if (!existsSync(db)) {
     return { error: 'no-database' };
   }
-  await refreshCatalog();
+  const [, liveSummaries] = await Promise.all([
+    refreshCatalog(),
+    fetchLiveTrajectorySummaries(),
+  ]);
   const workspace = workspacePath(workspaceUri);
-  const key = [fileStamp(db), fileStamp(`${db}-wal`), workspace, fileStamp(CATALOG_PATH)].join('|');
-  const cached = cache.get(conversationId);
+  const cached = cache.get(activeId);
+  const subSig = subagentCacheSignature(activeId, liveSummaries, cached?.report?.subagents);
+  const key = [fileStamp(db), fileStamp(`${db}-wal`), workspace, fileStamp(CATALOG_PATH), subSig, hostId].join('|');
   if (cached && cached.key === key) return cached.report;
 
   const { cmd, pre } = await findPython();
@@ -158,8 +219,17 @@ async function report(conversationId, workspaceUri) {
   if (existsSync(CATALOG_PATH)) args.push('--model-catalog', CATALOG_PATH);
   if (workspace) args.push('--workspace', workspace);
   const out = await run(cmd, args);
-  const result = { ...JSON.parse(out), updatedAt: new Date().toISOString() };
-  cache.set(conversationId, { key, report: result });
+  const parsed = JSON.parse(out);
+  mergeLiveSubagentStates(parsed.subagents, liveSummaries);
+  if (hostId && hostId !== activeId && !parsed.parent_conversation_id) {
+    parsed.parent_conversation_id = hostId;
+  }
+  const result = {
+    ...parsed,
+    host_conversation_id: hostId || activeId,
+    updatedAt: new Date().toISOString(),
+  };
+  cache.set(activeId, { key, report: result });
   return result;
 }
 
@@ -167,7 +237,7 @@ app.page('/', () => new Response(readFileSync(join(HERE, 'index.html'), 'utf8'),
 
 app.api('/api/report', async (data) => {
   try {
-    return await report(data.conversationId, data.workspace);
+    return await report(data.conversationId, data.workspace, data.targetId);
   } catch (err) {
     return { error: 'failed', message: err.message };
   }

@@ -29,7 +29,7 @@ const app = new SidecarApp();
 
 const PYTHON_CANDIDATES = process.platform === 'win32'
   ? [['python', []], ['py', ['-3']], ['python3', []]]
-  : [['python3', []], ['python', []]];
+  : [['python3', []], ['python', []], ['/opt/homebrew/bin/python3', []], ['/usr/local/bin/python3', []]];
 let python = null;
 
 function run(cmd, args, timeout = 20000) {
@@ -37,7 +37,7 @@ function run(cmd, args, timeout = 20000) {
     execFile(cmd, args, {
       timeout,
       maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
       windowsHide: true,
     }, (err, stdout, stderr) => (err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout)));
   });
@@ -47,7 +47,7 @@ async function findPython() {
   if (python) return python;
   for (const [cmd, pre] of PYTHON_CANDIDATES) {
     try {
-      const out = await run(cmd, [...pre, '--version'], 5000);
+      const out = await run(cmd, [...pre, '-c', 'import sys; print(f"Python {sys.version_info[0]}.{sys.version_info[1]}")'], 5000);
       if (/^Python 3\./.test(out.trim())) {
         python = { cmd, pre };
         return python;
@@ -125,9 +125,13 @@ const cache = new Map(); // activeId -> { key, report }
 
 function workspacePath(uri) {
   if (!uri || !uri.startsWith('file:')) return '';
-  let p = decodeURIComponent(uri.replace(/^file:\/\//, ''));
-  if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
-  return p;
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    let p = decodeURIComponent(uri.replace(/^file:\/\//, ''));
+    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+    return p;
+  }
 }
 
 function fileStamp(path) {

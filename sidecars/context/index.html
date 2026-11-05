@@ -521,9 +521,10 @@
   }
 
   function splitPath(path) {
-    const trimmed = path.replace(/\/$/, '');
+    const norm = String(path || '').replace(/\\/g, '/');
+    const trimmed = norm.replace(/\/$/, '');
     const i = trimmed.lastIndexOf('/');
-    const name = trimmed.slice(i + 1) + (path.endsWith('/') ? '/' : '');
+    const name = trimmed.slice(i + 1) + (norm.endsWith('/') ? '/' : '');
     let dir = i > 0 ? trimmed.slice(0, i) : '';
     const activeConv = report?.conversation_id || conversationId;
     if (activeConv) dir = dir.replace(new RegExp(`^.*/brain/${activeConv}`), 'conversation folder');

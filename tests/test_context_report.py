@@ -557,6 +557,16 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(context_report.fmt_tok(1_000_000), "1M")
         self.assertEqual(context_report.fmt_tok(1_250_000), "1.2M")
 
+    def test_shorten_path_cross_platform(self):
+        self.assertEqual(
+            context_report.shorten_path("file:///c:/Users/Alice/.gemini/GEMINI.md", r"C:\Users\Alice"),
+            "~/.gemini/GEMINI.md",
+        )
+        self.assertEqual(
+            context_report.shorten_path("file:///Users/alice2/file.py", "/Users/alice"),
+            "/Users/alice2/file.py",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

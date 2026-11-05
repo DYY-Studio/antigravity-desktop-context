@@ -190,18 +190,25 @@ def go_div4(n: int) -> int:
     return int(n / 4)
 
 
-def shorten_path(uri: str) -> str:
+def shorten_path(uri: str, home_dir: str | None = None) -> str:
     p = uri
     if p.startswith("file:"):
         parsed = urlparse(p)
         p = unquote(parsed.path)
         if len(p) > 2 and p[0] == "/" and p[2] == ":":
             p = p[1:]
-    home = str(Path.home())
+        elif parsed.netloc and parsed.netloc != "localhost":
+            p = f"//{parsed.netloc}{p}"
+    home = str(home_dir if home_dir is not None else Path.home()).replace("\\", "/").rstrip("/")
     p = p.replace("\\", "/")
-    home = home.replace("\\", "/")
-    if p.startswith(home):
-        return "~" + p[len(home) :]
+    if home:
+        case_insensitive = os.name == "nt" or (len(home) >= 2 and home[1] == ":")
+        p_cmp = p.lower() if case_insensitive else p
+        h_cmp = home.lower() if case_insensitive else home
+        if p_cmp == h_cmp:
+            return "~"
+        if p_cmp.startswith(h_cmp + "/"):
+            return "~" + p[len(home) :]
     return p
 
 
@@ -940,7 +947,7 @@ def render(
 
 
 def load(db_path: Path) -> tuple[list[Step], Msg | None]:
-    uri = "file:" + db_path.as_posix() + "?mode=ro"
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
         rows = conn.execute("SELECT idx, step_type, status, metadata, step_payload FROM steps ORDER BY idx").fetchall()
@@ -953,7 +960,7 @@ def load(db_path: Path) -> tuple[list[Step], Msg | None]:
 
 def load_meta(db_path: Path) -> tuple[Msg | None, int, int]:
     """Read trajectory_metadata_blob and latest executor_metadata termination info."""
-    uri = "file:" + db_path.as_posix() + "?mode=ro"
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     tmb = None
     term_reason = 0
@@ -1486,7 +1493,9 @@ def main():
         db_path = Path(args.db).expanduser()
         conv_id = db_path.stem
     else:
-        conv_dir = Path.home() / ".gemini" / "antigravity" / "conversations"
+        gemini_env = os.environ.get("ANTIGRAVITY_GEMINI_DIR")
+        gemini_dir = Path(gemini_env).expanduser() if gemini_env else Path.home() / ".gemini"
+        conv_dir = gemini_dir / args.app_dir / "conversations"
         conv_id = args.conversation_id
         if not conv_id:
             dbs = sorted(conv_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)

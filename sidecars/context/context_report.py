@@ -1408,6 +1408,24 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
     }
 
 
+ACTIVE_SUBAGENT_STATES = ("running", "generating", "starting")
+
+
+def sort_subagents(subagents: list[dict]) -> list[dict]:
+    return [
+        s
+        for _, s in sorted(
+            enumerate(subagents),
+            key=lambda item: (
+                0 if item[1].get("state") in ACTIVE_SUBAGENT_STATES else 1,
+                -(item[1].get("last_active_at") or item[1].get("created_at") or 0),
+                -(item[1].get("created_at") or 0),
+                -item[0],
+            ),
+        )
+    ]
+
+
 # Native context windows from the model catalog, which the CLI fetches from the server
 # (ModelInfo.max_tokens) and never writes to disk. Matched by model ID prefix; the first
 # match wins. Add a row when a new model family ships.
@@ -1523,7 +1541,7 @@ def main():
     system_files = detect_system_files(os.path.expanduser("~"), args.workspace, args.app_dir)
 
     subagent_metas = discover_subagents(conv_id, steps, db_path.parent)
-    subagents = [collect_subagent_summary(m, db_path.parent, catalog) for m in subagent_metas]
+    subagents = sort_subagents([collect_subagent_summary(m, db_path.parent, catalog) for m in subagent_metas])
 
     if args.json:
         print(json.dumps({

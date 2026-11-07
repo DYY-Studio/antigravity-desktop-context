@@ -175,6 +175,8 @@ function subagentCacheSignature(activeId, liveSummaries, cachedSubagents) {
   return parts.join(';');
 }
 
+const ACTIVE_SUBAGENT_STATES = new Set(['running', 'generating', 'starting']);
+
 function mergeLiveSubagentStates(subagents, liveSummaries) {
   if (!Array.isArray(subagents) || !subagents.length) return;
   for (const s of subagents) {
@@ -196,6 +198,15 @@ function mergeLiveSubagentStates(subagents, liveSummaries) {
       }
     }
   }
+  subagents.sort((a, b) => {
+    const aActive = ACTIVE_SUBAGENT_STATES.has(a.state) ? 0 : 1;
+    const bActive = ACTIVE_SUBAGENT_STATES.has(b.state) ? 0 : 1;
+    if (aActive !== bActive) return aActive - bActive;
+    const aLast = a.last_active_at || a.created_at || 0;
+    const bLast = b.last_active_at || b.created_at || 0;
+    if (bLast !== aLast) return bLast - aLast;
+    return (b.created_at || 0) - (a.created_at || 0);
+  });
 }
 
 async function report(conversationId, workspaceUri, targetId) {

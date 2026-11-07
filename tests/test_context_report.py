@@ -457,7 +457,9 @@ class ReportTest(unittest.TestCase):
         r = self.report()
         self.assertEqual(len(r["subagents"]), 2)
 
-        s1, s2 = r["subagents"][0], r["subagents"][1]
+        # Active subagent (sub2, generating, last_active_at=1030) is placed above
+        # completed subagent (sub1, reported, last_active_at=1066).
+        s2, s1 = r["subagents"][0], r["subagents"][1]
         self.assertEqual(s1["conversation_id"], sub1_id)
         self.assertEqual(s1["role"], "Codebase Researcher")
         self.assertEqual(s1["type_name"], "research")
@@ -566,6 +568,16 @@ class FormatTest(unittest.TestCase):
             context_report.shorten_path("file:///Users/alice2/file.py", "/Users/alice"),
             "/Users/alice2/file.py",
         )
+
+    def test_sort_subagents(self):
+        items = [
+            {"conversation_id": "old-reported", "state": "reported", "created_at": 100, "last_active_at": 200},
+            {"conversation_id": "run-older", "state": "running", "created_at": 150, "last_active_at": 250},
+            {"conversation_id": "new-reported", "state": "reported", "created_at": 120, "last_active_at": 400},
+            {"conversation_id": "gen-newer", "state": "generating", "created_at": 180, "last_active_at": 300},
+        ]
+        ordered = [s["conversation_id"] for s in context_report.sort_subagents(items)]
+        self.assertEqual(ordered, ["gen-newer", "run-older", "new-reported", "old-reported"])
 
 
 if __name__ == "__main__":

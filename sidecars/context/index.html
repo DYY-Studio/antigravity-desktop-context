@@ -380,8 +380,7 @@
   }
 
   function navBar(r) {
-    const isDrilledDown = Boolean(targetId && targetId !== conversationId);
-    const parentId = r.parent_conversation_id || (isDrilledDown ? conversationId : '');
+    const parentId = r.parent_conversation_id || '';
     if (!parentId && !r.subagent_info) return '';
     const sinfo = r.subagent_info || {};
     const label = sinfo.role || sinfo.type_name || r.conversation_id.slice(0, 8);

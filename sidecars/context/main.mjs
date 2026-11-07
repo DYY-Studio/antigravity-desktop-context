@@ -236,7 +236,12 @@ async function report(conversationId, workspaceUri, targetId) {
   const out = await run(cmd, args);
   const parsed = JSON.parse(out);
   mergeLiveSubagentStates(parsed.subagents, liveSummaries);
-  if (hostId && hostId !== activeId && !parsed.parent_conversation_id) {
+  const isChildOfHost =
+    hostId &&
+    hostId !== activeId &&
+    (liveSummaries[activeId]?.trajectoryMetadata?.parentConversationId === hostId ||
+      cache.get(hostId)?.report?.subagents?.some((s) => s.conversation_id === activeId));
+  if (isChildOfHost && !parsed.parent_conversation_id) {
     parsed.parent_conversation_id = hostId;
   }
   const result = {

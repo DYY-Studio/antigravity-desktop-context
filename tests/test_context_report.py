@@ -571,13 +571,13 @@ class FormatTest(unittest.TestCase):
 
     def test_sort_subagents(self):
         items = [
-            {"conversation_id": "old-reported", "state": "reported", "created_at": 100, "last_active_at": 200},
-            {"conversation_id": "run-older", "state": "running", "created_at": 150, "last_active_at": 250},
-            {"conversation_id": "new-reported", "state": "reported", "created_at": 120, "last_active_at": 400},
-            {"conversation_id": "gen-newer", "state": "generating", "created_at": 180, "last_active_at": 300},
+            {"conversation_id": "reused-reported", "state": "reported", "created_at": 100, "last_active_at": 500},
+            {"conversation_id": "run-older", "state": "running", "created_at": 150, "last_active_at": 450},
+            {"conversation_id": "early-reported", "state": "reported", "created_at": 200, "last_active_at": 300},
+            {"conversation_id": "gen-newer", "state": "generating", "created_at": 180, "last_active_at": 250},
         ]
         ordered = [s["conversation_id"] for s in context_report.sort_subagents(items)]
-        self.assertEqual(ordered, ["gen-newer", "run-older", "new-reported", "old-reported"])
+        self.assertEqual(ordered, ["gen-newer", "run-older", "reused-reported", "early-reported"])
 
 
 if __name__ == "__main__":

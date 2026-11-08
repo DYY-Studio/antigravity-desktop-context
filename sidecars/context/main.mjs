@@ -199,12 +199,12 @@ function mergeLiveSubagentStates(subagents, liveSummaries) {
     }
   }
   subagents.sort((a, b) => {
-    const aActive = ACTIVE_SUBAGENT_STATES.has(a.state) ? 0 : 1;
-    const bActive = ACTIVE_SUBAGENT_STATES.has(b.state) ? 0 : 1;
-    if (aActive !== bActive) return aActive - bActive;
-    const aLast = a.last_active_at || a.created_at || 0;
-    const bLast = b.last_active_at || b.created_at || 0;
-    if (bLast !== aLast) return bLast - aLast;
+    const aActive = ACTIVE_SUBAGENT_STATES.has(a.state);
+    const bActive = ACTIVE_SUBAGENT_STATES.has(b.state);
+    if (aActive !== bActive) return aActive ? -1 : 1;
+    const aTs = aActive ? (a.created_at || 0) : (a.last_active_at || a.created_at || 0);
+    const bTs = bActive ? (b.created_at || 0) : (b.last_active_at || b.created_at || 0);
+    if (bTs !== aTs) return bTs - aTs;
     return (b.created_at || 0) - (a.created_at || 0);
   });
 }

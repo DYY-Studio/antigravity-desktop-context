@@ -1411,19 +1411,20 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
 ACTIVE_SUBAGENT_STATES = ("running", "generating", "starting")
 
 
+def _subagent_sort_key(item: tuple[int, dict]) -> tuple[int, int, int, int]:
+    idx, s = item
+    active = s.get("state") in ACTIVE_SUBAGENT_STATES
+    primary_ts = (s.get("created_at") or 0) if active else (s.get("last_active_at") or s.get("created_at") or 0)
+    return (
+        0 if active else 1,
+        -primary_ts,
+        -(s.get("created_at") or 0),
+        -idx,
+    )
+
+
 def sort_subagents(subagents: list[dict]) -> list[dict]:
-    return [
-        s
-        for _, s in sorted(
-            enumerate(subagents),
-            key=lambda item: (
-                0 if item[1].get("state") in ACTIVE_SUBAGENT_STATES else 1,
-                -(item[1].get("last_active_at") or item[1].get("created_at") or 0),
-                -(item[1].get("created_at") or 0),
-                -item[0],
-            ),
-        )
-    ]
+    return [s for _, s in sorted(enumerate(subagents), key=_subagent_sort_key)]
 
 
 # Native context windows from the model catalog, which the CLI fetches from the server

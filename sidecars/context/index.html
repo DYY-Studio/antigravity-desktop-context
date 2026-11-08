@@ -77,7 +77,7 @@
   .usage .big { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
   .usage .of { color: var(--dim); }
   .usage .pct { margin-left: auto; font-size: 13px; font-weight: 600; }
-  .budget-line, .cache-line, .tps-line {
+  .budget-line, .cache-line, .tps-line, .hook-line {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -86,6 +86,33 @@
     color: var(--dim);
     margin-bottom: 4px;
     flex-wrap: wrap;
+  }
+  .budget-val,
+  .budget-pct,
+  .sub-val,
+  .sub-pct { color: var(--c-ok); }
+  .budget-line.warn .budget-val,
+  .budget-line.warn .budget-pct,
+  .sub-val.warn,
+  .sub-pct.warn { color: var(--c-warn); }
+  .budget-line.critical .budget-val,
+  .budget-line.critical .budget-pct,
+  .sub-val.danger,
+  .sub-pct.danger { color: var(--c-err); }
+  .pills { display: inline-flex; gap: 3px; }
+  .pill {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--dim);
+    border: 1px solid var(--line);
+    background: transparent;
+  }
+  .pill.active {
+    color: var(--c-agent);
+    border-color: color-mix(in srgb, var(--c-agent) 55%, transparent);
+    background: color-mix(in srgb, var(--c-agent) 12%, transparent);
+    font-weight: 600;
   }
   .grid { margin-top: 6px; }
   button {
@@ -399,12 +426,33 @@
   function budgetLine(r) {
     const budget = r.request_budget_tokens;
     if (!budget || !r.limit_tokens || budget >= r.limit_tokens) return '';
-    const bPct = Math.min(100, (r.used_tokens / budget) * 100).toFixed(1);
+    const used = r.budget_used_tokens || r.used_tokens || 0;
+    const pctVal = (used / budget) * 100;
+    const bPct = pctVal.toFixed(1);
+    const tone = pctVal >= 95 ? ' critical' : (pctVal >= 80 ? ' warn' : '');
     const ckCount = Array.isArray(r.checkpoints) ? r.checkpoints.length : 0;
     const ckText = ckCount > 0 ? `<span class="ck-tag">Compacted ×${ckCount}</span>` : '<span> Compaction threshold</span>';
-    return `<div class="budget-line num">
-      <span>Request budget: <strong>${fmtTok(r.used_tokens)}</strong> / ${fmtTok(budget)} (${bPct}%)</span>
+    return `<div class="budget-line num${tone}" title="Effective tokens checked against the compaction threshold (${fmtTok(budget)})">
+      <span>Request budget: <strong class="budget-val">${fmtTok(used)}</strong> / ${fmtTok(budget)} (<strong class="budget-pct">${bPct}%</strong>)</span>
       ${ckText}
+    </div>`;
+  }
+
+  function hookLine(r) {
+    const budget = r.request_budget_tokens;
+    if (!budget || !r.limit_tokens || budget >= r.limit_tokens) return '';
+    const mode = r.hookConfig?.agentAlert || 'tiered';
+    const opts = [
+      { id: 'off', label: 'Off', tip: 'Disable PostInvocation compaction alerts to the agent' },
+      { id: 'critical', label: '≥95%', tip: 'Notify agent via ephemeralMessage only at ≥95% / ≥100% and after compaction' },
+      { id: 'tiered', label: '≥85%', tip: 'Notify agent via ephemeralMessage at ≥85%, ≥95%, ≥100% and after compaction' },
+    ];
+    const pills = opts.map((o) =>
+      `<button type="button" class="pill${mode === o.id ? ' active' : ''}" data-action="set-alert" data-mode="${o.id}" title="${esc(o.tip)}">${o.label}</button>`
+    ).join('');
+    return `<div class="hook-line num" title="Inject ephemeral compaction warning to the agent in PostInvocation">
+      <span>Agent alert</span>
+      <span class="pills">${pills}</span>
     </div>`;
   }
 
@@ -436,8 +484,10 @@
     const state = s.state || 'idle';
     const stateLabel = STATE_LABELS[state] || state;
     const budget = s.request_budget_tokens || s.limit_tokens || 0;
-    const pctVal = budget ? Math.min(100, (s.used_tokens / budget) * 100) : s.used_pct || 0;
-    const toneClass = pctVal >= 90 ? ' danger' : (pctVal >= 75 ? ' warn' : '');
+    const budgetUsed = s.budget_used_tokens || s.used_tokens || 0;
+    const rawPct = budget ? (budgetUsed / budget) * 100 : (s.used_pct || 0);
+    const pctVal = Math.min(100, rawPct);
+    const toneClass = rawPct >= 95 ? ' danger' : (rawPct >= 80 ? ' warn' : '');
     const dur = fmtDur(s.duration_seconds);
     const metaParts = [];
     if (s.type_name && s.role) metaParts.push(s.type_name);
@@ -480,7 +530,7 @@
       <div class="sub-meter">
         <div class="bar-track"><div class="bar-fill${toneClass}" style="--fill:${pctVal.toFixed(1)}%"></div></div>
         <div class="sub-stats num">
-          <span><strong>${fmtTok(s.used_tokens)}</strong> / ${budget ? `${fmtTok(budget)} (${pctVal.toFixed(1)}%)` : `${fmtTok(s.limit_tokens)}`}${s.checkpoint_count ? ` · <span class="ck-tag">Compacted ×${s.checkpoint_count}</span>` : ''}</span>
+          <span><strong class="sub-val${toneClass}">${fmtTok(budgetUsed)}</strong> / ${budget ? `${fmtTok(budget)} (<span class="sub-pct${toneClass}">${rawPct.toFixed(1)}%</span>)` : `${fmtTok(s.limit_tokens)}`}${s.checkpoint_count ? ` · <span class="ck-tag">Compacted ×${s.checkpoint_count}</span>` : ''}</span>
           <span>${esc(metaParts.join(' · '))}</span>
         </div>
         ${cacheRow}
@@ -567,6 +617,7 @@
       ${budgetLine(r)}
       ${cacheLine(r)}
       ${tpsLine(r)}
+      ${hookLine(r)}
       ${grid(r)}
       ${categories(r)}
       ${subagentsSection(r)}
@@ -587,6 +638,11 @@
     }
     const action = btn.dataset.action;
     const id = btn.dataset.id || '';
+    if (action === 'set-alert') {
+      const mode = btn.dataset.mode || '';
+      if (mode) updateHookConfig({ agentAlert: mode });
+      return;
+    }
     if (action === 'toggle-subagents') {
       showAllSubagents = !showAllSubagents;
       if (report) render(report);
@@ -634,6 +690,22 @@
     }
     btn.textContent = 'Copied';
     setTimeout(() => { btn.textContent = 'Copy as text'; }, 1500);
+  }
+
+  async function updateHookConfig(patch) {
+    try {
+      const res = await doFetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (data?.hookConfig && report) {
+        report.hookConfig = data.hookConfig;
+        lastJson = JSON.stringify(report);
+        render(report);
+      }
+    } catch { /* next poll will resync */ }
   }
 
   async function refresh() {

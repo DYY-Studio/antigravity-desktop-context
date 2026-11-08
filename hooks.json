@@ -1,0 +1,11 @@
+{
+  "desktop-context-compaction": {
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node -e \"const {existsSync}=require('node:fs'),{homedir}=require('node:os'),{join,resolve}=require('node:path'),{pathToFileURL}=require('node:url');const g=process.env.ANTIGRAVITY_GEMINI_DIR||join(homedir(),'.gemini');const s=existsSync('sidecars/context/main.mjs')?resolve('sidecars/context/main.mjs'):join(g,'config','plugins','desktop-context','sidecars','context','main.mjs');import(pathToFileURL(s).href).then(m=>m.runLifecycleHook('PostInvocation'));\"",
+        "timeout": 10
+      }
+    ]
+  }
+}

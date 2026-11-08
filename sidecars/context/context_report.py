@@ -331,6 +331,47 @@ def step_tokens(step: Step) -> int:
     return estimate_step_tokens(step)
 
 
+def post_turn_step_tokens(step: Step) -> int:
+    base = step_tokens(step)
+    if step.md.int(23, signed32=True) <= 0 and step.generic_pb is not None:
+        res = step.generic_pb.msg(2)
+        if res is not None:
+            base += go_div4(len(res.bytes(1)))
+    return base
+
+
+def effective_budget_tokens(steps: list[Step], gen: Msg | None, st: dict) -> int:
+    """Actual token count checked against request_budget (modelReportedPrefixTokens + post-turn steps)."""
+    if st.get("compacted"):
+        return st["total"]
+    ckpt_pos = -1
+    for i, s in enumerate(steps):
+        if s.payload(STEP_CHECKPOINT) is not None and s.status == STATUS_DONE:
+            ckpt_pos = i
+    pos_last = -1
+    prefix_tok = 0
+    for i in range(len(steps) - 1, ckpt_pos, -1):
+        s = steps[i]
+        if s.payload(STEP_PLANNER_RESPONSE) is None:
+            continue
+        u = s.md.msg(9)
+        if u is None:
+            continue
+        inp, out_tok, cache_r, cache_w = u.int(2), u.int(3), u.int(5), u.int(6)
+        if inp + cache_r + cache_w > 0:
+            pos_last = i
+            prefix_tok = inp + cache_r + cache_w + out_tok
+            break
+    if pos_last >= 0:
+        delta_tok = sum(
+            post_turn_step_tokens(s)
+            for s in steps[pos_last + 1 :]
+            if s.payload(STEP_CHECKPOINT) is None
+        )
+        return max(st["total"], prefix_tok + delta_tok)
+    return st["total"]
+
+
 def compaction_tokens(step: Step) -> int:
     for ri in reversed(step.md.msgs(28)):  # retry_infos
         usage = ri.msg(2)
@@ -1298,6 +1339,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
             "last_active_at": meta["created_at"],
             "duration_seconds": 0,
             "used_tokens": 0,
+            "budget_used_tokens": 0,
             "limit_tokens": 0,
             "used_pct": 0.0,
             "request_budget_tokens": 0,
@@ -1326,7 +1368,8 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
     cache_stats = collect_cache_stats(steps, gen)
     output_stats = collect_output_stats(steps, gen)
     req_budget = request_budget(gen) or (256_000 if limit > 256_000 else limit)
-    budget_pct = round(min(100.0, pct(st["total"], req_budget)), 1) if req_budget else 0.0
+    budget_used = effective_budget_tokens(steps, gen, st)
+    budget_pct = round(pct(budget_used, req_budget), 1) if req_budget else 0.0
 
     start_ts, end_ts, duration = step_timestamps(steps, lineage["created_at"] or meta["created_at"])
 
@@ -1395,6 +1438,7 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
         "last_active_at": end_ts,
         "duration_seconds": duration,
         "used_tokens": st["total"],
+        "budget_used_tokens": budget_used,
         "limit_tokens": limit,
         "used_pct": round(min(100.0, pct(st["total"], limit)), 1),
         "request_budget_tokens": req_budget,
@@ -1545,6 +1589,8 @@ def main():
     subagents = sort_subagents([collect_subagent_summary(m, db_path.parent, catalog) for m in subagent_metas])
 
     if args.json:
+        req_budget = request_budget(gen)
+        budget_used = effective_budget_tokens(steps, gen, st)
         print(json.dumps({
             "conversation_id": conv_id,
             "parent_conversation_id": lineage["parent_conversation_id"],
@@ -1556,7 +1602,9 @@ def main():
             "checkpoint_view": checkpoint_view(st),
             "text": render(st, model, system_files, args.width, False, subagents),
             "model_id": model_id(gen),
-            "request_budget_tokens": request_budget(gen),
+            "request_budget_tokens": req_budget,
+            "budget_used_tokens": budget_used,
+            "budget_pct": round(pct(budget_used, req_budget), 1) if req_budget else 0.0,
             "used_tokens": st["total"],
             "limit_tokens": limit,
             "used_pct": round(min(100.0, pct(st["total"], limit)), 1),

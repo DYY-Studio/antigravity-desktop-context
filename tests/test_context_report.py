@@ -535,6 +535,46 @@ class ReportTest(unittest.TestCase):
             {"type_name": "self", "role": "Database Debugger", "nesting_depth": 2},
         )
 
+    def test_effective_budget_tokens_and_lifecycle_hook(self):
+        self.db.step(USER_INPUT, payload_field=P_USER, payload=user_input("initial prompt"))
+        self.db.step(
+            PLANNER_RESPONSE,
+            metadata=f(9, usage(20_000, 2_000, 200_000)),  # 222,000 prefix tokens (86.7% of 256k)
+            payload_field=P_PLANNER,
+            payload=planner("working..."),
+        )
+        self.db.step(
+            GENERIC,
+            metadata=tool_call("a" * 400),  # 100 tokens
+            payload_field=140,
+            payload=f(2, f(1, "b" * 3_600)),  # 900 tokens in generic tool output -> +1,000 delta
+        )
+        self.db.generation(
+            [group(1, 10_000), group(7, 170_000, ("0: USER_INPUT", 170_000))],
+            max_context=256_000,
+            model="gemini-3-1-pro-high",
+        )
+        r = self.report()
+        self.assertEqual(r["used_tokens"], 180_000)
+        self.assertEqual(r["budget_used_tokens"], 223_000)
+        self.assertEqual(r["budget_pct"], 87.1)
+
+        main_mjs = SCRIPT.parent / "main.mjs"
+        js_code = (
+            f"import {{ evaluateLifecycleHook }} from {json.dumps(main_mjs.as_uri())};\n"
+            f"const stateMap = {{}};\n"
+            f"const dbPath = {json.dumps(str(self.db_path))};\n"
+            f"const r1 = evaluateLifecycleHook('PostInvocation', {{ initialNumSteps: 0 }}, {{ dbPath, stateMap, config: {{ agentAlert: 'tiered' }} }});\n"
+            f"const r2 = evaluateLifecycleHook('PostInvocation', {{ initialNumSteps: 0 }}, {{ dbPath, stateMap, config: {{ agentAlert: 'tiered' }} }});\n"
+            f"const rCrit = evaluateLifecycleHook('PostInvocation', {{ initialNumSteps: 0 }}, {{ dbPath, stateMap: {{}}, config: {{ agentAlert: 'critical' }} }});\n"
+            f"console.log(JSON.stringify({{ r1, r2, rCrit }}));\n"
+        )
+        out = subprocess.check_output(["node", "--input-type=module", "-e", js_code], text=True)
+        parsed = json.loads(out)
+        self.assertIn("87.1%", parsed["r1"]["injectSteps"][0]["ephemeralMessage"])
+        self.assertEqual(parsed["r2"], {})  # deduplicated within the same warn85 tier
+        self.assertEqual(parsed["rCrit"], {})  # suppressed when mode is critical (>=95%)
+
 
 class FormatTest(unittest.TestCase):
     def test_model_label(self):

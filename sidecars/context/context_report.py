@@ -924,6 +924,8 @@ def render_subagents(subagents: list[dict]) -> str:
         used = fmt_tok(s.get("used_tokens", 0))
         budget = s.get("request_budget_tokens") or s.get("limit_tokens") or 0
         budget_str = f"/{fmt_tok(budget)} budget ({s.get('budget_pct', 0.0):.1f}%)" if budget else ""
+        model_name_str = s.get("model") or ""
+        model_str = f" · {model_name_str}" if model_name_str and model_name_str != "Unknown Model" else ""
         ck = f" · Compacted ×{s['checkpoint_count']}" if s.get("checkpoint_count") else ""
         dur = fmt_duration(s.get("duration_seconds", 0))
         dur_str = f" · {dur}" if dur else ""
@@ -941,7 +943,7 @@ def render_subagents(subagents: list[dict]) -> str:
         )
         action = f" — {s['current_action']}" if s.get("current_action") else ""
         out.append(
-            f" └ [{state}] {role}{tname}: {used}{budget_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{cache_str}{tps_str}{action}\n"
+            f" └ [{state}] {role}{tname}: {used}{budget_str}{model_str} · {s.get('step_count', 0)} steps{dur_str}{ck}{cache_str}{tps_str}{action}\n"
         )
     return "".join(out)
 
@@ -1046,6 +1048,8 @@ def parse_trajectory_lineage(tmb: Msg | None, conv_id: str) -> dict:
             "role": spec.str(2) if spec is not None else "",
             "nesting_depth": tmb.int(17) or (1 if parent_id else 0),
         }
+        if spec is not None and spec.int(7):
+            subagent_info["model_enum"] = spec.int(7)
     return {
         "parent_conversation_id": parent_id,
         "root_conversation_id": root_id,
@@ -1360,10 +1364,10 @@ def collect_subagent_summary(meta: dict, conv_dir: Path, catalog: dict) -> dict:
     type_name = meta["type_name"] or sinfo.get("type_name") or ""
     nesting_depth = sinfo.get("nesting_depth") or meta["nesting_depth"] or 1
 
-    m_id = model_id(gen)
+    m_id = model_id(gen) or ENUM_MODEL_IDS.get(sinfo.get("model_enum") or 0, "")
     cat_entry = catalog.get(m_id) or {}
-    limit = int(cat_entry.get("maxTokens") or 0) or context_limit(gen)
-    model = cat_entry.get("displayName") or model_name(gen)
+    limit = int(cat_entry.get("maxTokens") or 0) or context_limit(gen, m_id)
+    model = cat_entry.get("displayName") or model_name(gen, m_id)
     st = collect_stats(steps, gen, limit)
     cache_stats = collect_cache_stats(steps, gen)
     output_stats = collect_output_stats(steps, gen)
@@ -1482,8 +1486,28 @@ NATIVE_CONTEXT_WINDOWS = [
     ("gemini-", 1_048_576),
 ]
 
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "tiered")
 WORD_LABELS = {"gpt": "GPT", "oss": "OSS"}
+
+ENUM_MODEL_IDS = {
+    1417: "gemini-4-argon-high",
+    1418: "gemini-4-argon-medium",
+    1419: "gemini-4-argon-low",
+    1402: "claude-opus-5-5-high",
+    1401: "claude-opus-5-5-medium",
+    1400: "claude-opus-5-5-low",
+    1405: "claude-sonnet-5-5-high",
+    1404: "claude-sonnet-5-5-medium",
+    1403: "claude-sonnet-5-5-low",
+    1318: "gemini-3.8-flash-high",
+    1319: "gemini-3.8-flash-medium",
+    1320: "gemini-3.8-flash-low",
+    1322: "gemini-3.8-flash-tiered",
+    1198: "gemini-3.5-flash-lite",
+    1050: "gemini-3.1-flash-lite",
+    1021: "gemini-3.1-flash-image",
+    1018: "gemini-3-flash",
+}
 
 
 def model_id(gen: Msg | None) -> str:
@@ -1509,20 +1533,21 @@ def model_label(slug: str) -> str:
     return f"{label} ({effort})" if effort else label
 
 
-def model_name(gen: Msg | None) -> str:
+def model_name(gen: Msg | None, slug_fallback: str = "") -> str:
     chat = gen.msg(1) if gen is not None else None
     if chat is not None and chat.str(21):  # model_display_name
         return chat.str(21)
-    if model_id(gen):
-        return model_label(model_id(gen))
+    slug = model_id(gen) or slug_fallback
+    if slug:
+        return model_label(slug)
     if chat is not None and chat.str(19):  # response_model
         return chat.str(19)
     return "Unknown Model"
 
 
-def context_limit(gen: Msg | None) -> int:
+def context_limit(gen: Msg | None, slug_fallback: str = "") -> int:
     """The model's native window, like the CLI; else the request budget (max_context_tokens)."""
-    slug = model_id(gen)
+    slug = model_id(gen) or slug_fallback
     for prefix, tokens in NATIVE_CONTEXT_WINDOWS:
         if slug.startswith(prefix):
             return tokens

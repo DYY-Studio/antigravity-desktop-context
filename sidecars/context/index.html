@@ -169,6 +169,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .sub-meta {
+    margin-top: 2px;
+    font-size: 11.5px;
+    color: var(--dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .sub-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 
   .state-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--dim); }
@@ -489,9 +497,11 @@
     const pctVal = Math.min(100, rawPct);
     const toneClass = rawPct >= 95 ? ' danger' : (rawPct >= 80 ? ' warn' : '');
     const dur = fmtDur(s.duration_seconds);
-    const metaParts = [];
-    if (s.type_name && s.role) metaParts.push(s.type_name);
-    metaParts.push(`${s.step_count || 0} steps`);
+    const modelName = s.model && s.model !== 'Unknown Model' ? s.model : '';
+    const headMeta = [];
+    if (modelName) headMeta.push(modelName);
+    if (s.type_name && s.role) headMeta.push(s.type_name);
+    const metaParts = [`${s.step_count || 0} steps`];
     if (dur) metaParts.push(dur);
 
     const cs = s.cache_stats;
@@ -521,12 +531,13 @@
 
     return `<li class="sub-card">
       <div class="sub-head">
-        <div class="sub-title" title="${esc(role)} (${esc(s.model)})">
+        <div class="sub-title" title="${esc(role)}${modelName ? ` (${esc(modelName)})` : ''}">
           <span class="state-dot ${esc(state)}"></span>
           <span class="sub-role">${esc(role)}</span>
         </div>
         <span class="state-pill ${esc(state)}">${esc(stateLabel)}</span>
       </div>
+      ${headMeta.length ? `<div class="sub-meta" title="${esc(headMeta.join(' · '))}">${esc(headMeta.join(' · '))}</div>` : ''}
       <div class="sub-meter">
         <div class="bar-track"><div class="bar-fill${toneClass}" style="--fill:${pctVal.toFixed(1)}%"></div></div>
         <div class="sub-stats num">

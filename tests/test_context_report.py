@@ -449,8 +449,8 @@ class ReportTest(unittest.TestCase):
         sub2.generation(
             [group(1, 8_000), group(7, 200_000, ("0: USER_INPUT", 200_000))],
             max_context=256_000,
-            model="gemini-4-argon-high",
-            display_name="Gemini 4 Argon (High)",
+            model="gemini-3.8-flash-tiered",
+            display_name="",
         )
         sub2.close()
 
@@ -463,6 +463,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(s1["conversation_id"], sub1_id)
         self.assertEqual(s1["role"], "Codebase Researcher")
         self.assertEqual(s1["type_name"], "research")
+        self.assertEqual(s1["model"], "Gemini 4 Argon (High)")
         self.assertEqual(s1["state"], "reported")
         self.assertTrue(s1["has_reported"])
         self.assertEqual(s1["used_tokens"], 51_200)
@@ -509,13 +510,14 @@ class ReportTest(unittest.TestCase):
 
         self.assertEqual(s2["conversation_id"], sub2_id)
         self.assertEqual(s2["role"], "Security Auditor")
+        self.assertEqual(s2["model"], "Gemini 3.8 Flash (Tiered)")
         self.assertEqual(s2["state"], "generating")
         self.assertEqual(s2["used_tokens"], 208_000)
         self.assertEqual(s2["budget_pct"], 81.2)
         self.assertEqual(s2["current_action"], "Generating response…")
         self.assertIn("Subagents (2)", r["text"])
-        self.assertIn("[REPORTED] Codebase Researcher (research): 51.2k/256.0k budget (20.0%)", r["text"])
-        self.assertIn("[GENERATING] Security Auditor (research): 208.0k/256.0k budget (81.2%)", r["text"])
+        self.assertIn("[REPORTED] Codebase Researcher (research): 51.2k/256.0k budget (20.0%) · Gemini 4 Argon (High)", r["text"])
+        self.assertIn("[GENERATING] Security Auditor (research): 208.0k/256.0k budget (81.2%) · Gemini 3.8 Flash (Tiered)", r["text"])
 
     def test_subagent_direct_report_lineage(self):
         self.db.trajectory_meta(
